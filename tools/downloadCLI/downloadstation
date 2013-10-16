@@ -1,0 +1,792 @@
+#!/usr/bin/env python
+
+"""
+Version 1.8
+
+Copyright (C) 2011 Matthias Radig
+
+This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+http://www.gnu.org/licenses/gpl-3.0.txt
+
+Original : http://downloadstation.jroene.de/downloadstation
+
+"""
+
+import optparse, sys, os, datetime, time, re, pyPgSQL
+import pyPgSQL.PgSQL as db
+
+allowedInUrl = r"[\w|\.|\-|!|?|/|#|&|%|\+|=]"
+
+# command line options ****************************************************
+
+option_conf = [
+    ('--host', '-s', 'localhost'),
+    ('--port', '-p', '5432'),
+    ('--target', '-t', ''),
+    ('--user', '-u',  None),
+    ('--order', '-o', 'task_id'),
+    ('--expression', '-e', '*'),
+    ('--direction', '-d', 'asc')
+]
+
+# general helpers *********************************************************
+
+# these are not available on string objects in python 2.4
+def partition(s, n, reverse=False):
+    if reverse:
+        i = s.rfind(n)
+    else:
+        i = s.find(n)
+    if i < 0:
+        return s, '', ''
+    return s[:i], s[i:i+1], s[i+1:]
+
+def rpartition(s, n):
+    return partition(s, n, True)
+
+# formatting results ******************************************************
+
+states = {1:'WAITING', 2:'ACTIVE', 3:'PAUSED', 4:'COMPLETING', 5:'COMPLETE', 6:'CHECKING', 8:'SEEDING', 101:'ERROR', 107:'TIMEOUT'}
+
+def noFormat(object):
+    return str(object)
+
+def formatTime(millis):
+    if millis != None:
+        time = datetime.datetime.fromtimestamp(millis)
+        return str(time)
+    return '-'
+
+def formatSize(bytes):
+    if bytes != None:
+        mb = bytes / (1024.0 * 1024)
+        return '%.2f MB' % mb
+    return '-'
+
+def formatProgress(curr, total):
+    if curr != None and total != None:
+        return '%.2f %%' % (100.0 * curr / total)
+    return '-'
+
+def formatStatus(status):
+    if status in states:
+        return states[status]
+    return 'UNKNOWN %s' % status
+
+def formatSmartStatus(status, curr, total):
+    if status == 2:
+        return formatProgress(curr, total)
+    return formatStatus(status)
+
+def formatRate(bps):
+    if bps != None and bps > 0:
+        kbps = bps / 1024.0
+        return '%.0f KB/s' % kbps
+    return '-';
+
+def formatRatio(ratio):
+    if ratio != None:
+        return '%.2f' % ratio
+
+formatters = {
+    'task' :        (('task_id',), noFormat),
+    'user' :        (('username',), noFormat),
+    'created':      (('created_time',), formatTime),
+    'started':      (('started_time',), formatTime),
+    'size':         (('total_size',),   formatSize),
+    'part_size':    (('current_size',), formatSize),
+    'progress':     (('current_size', 'total_size'), formatProgress),
+    'status':       (('status', 'current_size', 'total_size'), \
+            formatSmartStatus),
+    'simple_status':(('status',), formatStatus),
+    'rate':         (('current_rate',), formatRate),
+    'upload_rate':  (('upload_rate',), formatRate),
+    'upload_size':  (('total_upload',), formatSize),
+    'seeding_ratio':(('seeding_ratio',), formatRatio)
+}
+
+default_columns = ('task', 'filename', 'status', 'rate')
+default_torrent_columns = ('task', 'filename', 'status', 'rate',
+        'upload_rate', 'connected_peers')
+
+def format(columns, table):
+    index = range(len(columns))
+    result = []
+    result.append(columns)
+    for line in table:
+        formatted = []
+        for i in index:
+            col = columns[i]
+            if col in formatters:
+                #formatted.append(formatters[columns[i]][1](line[i]))
+                db_colums = formatters[col][0]
+                formatter = formatters[col][1]
+                args = []
+                for db_col in db_colums:
+                    args.append(line[db_col])
+                formatted.append(formatter(*args))
+            else:
+                formatted.append(noFormat(line[col]))
+        result.append(formatted)
+    return result
+
+def printTable(table):
+    chars_per_col = []
+    index = range(len(table[0]))
+    lines = []
+    for i in index:
+        chars_per_col.append(0)
+    for line in table:
+        for i in index:
+            chars_per_col[i] = max(len(line[i]), chars_per_col[i])
+    for line in table:
+        string = []
+        for i in index:
+            string.append(line[i] + ' ' * (chars_per_col[i]-len(line[i])))
+        lines.append('  '.join(string))
+    return lines
+
+# database query helpers **************************************************
+
+def userClause(options):
+    if options.user != None:
+        return "AND username = '"+options.user+"'"
+    return ''
+
+def idClause(ids):
+    if ids[0] != 'all':
+        return 'AND task_id IN ('+','.join(ids)+')'
+    return ''
+
+def createSelection(columns):
+    selection = set()
+    for col in columns:
+        if col in formatters:
+            for db_col in formatters[col][0]:
+                selection.add(db_col)
+        else:
+            selection.add(col)
+    return ', '.join(selection)
+
+# URL parsing helpers *****************************************************
+
+def parseFilename(url):
+    return rpartition(url, '/')[2]
+
+def parseURLs(pattern, string):
+    pattern = pattern.replace('.', r'\.')
+    pattern = pattern.replace('+', r'\+')
+    regex = '(?:http|https|ftp)://'+pattern.replace('*', allowedInUrl+'*')
+    result = re.findall(regex, string)
+    # remove duplicates, keep order
+    unique = []
+    [unique.append(x) for x in result if x not in unique]
+    return unique
+
+
+# commands ****************************************************************
+
+def lineList(conn, options, columns, filter='1=1'):
+    selection = createSelection(columns)
+    query = 'SELECT '+selection+' FROM download_queue WHERE '+filter+' '+userClause(options)+' ORDER BY '+options.order+' '+options.direction
+    cursor = conn.cursor()
+    cursor.execute(query)
+    result = cursor.fetchall()
+    cursor.close()
+    #format results
+    formatted = format(columns, result)
+    return printTable(formatted)
+
+def list(conn, options, columns, filter='1=1'):
+    if len(columns) == 0:
+        columns = default_columns
+    lines = lineList(conn, options, columns, filter)
+    for line in lines:
+        print line
+
+def torrentlist(conn, options, columns):
+    if len(columns) == 0:
+        columns = default_torrent_columns
+    list(conn, options, columns, 'torrent IS NOT NULL')
+
+
+def monitor(conn, options, columns, filter='1=1'):
+    import curses, time
+    if len(columns) == 0:
+        columns = default_columns
+    def hook(stdscr):
+        in_down = set([ord('j'), curses.KEY_DOWN])
+        in_up = set([ord('k'), curses.KEY_UP])
+        in_left = set([ord('h'), curses.KEY_LEFT])
+        in_right = set([ord('l'), curses.KEY_RIGHT])
+        in_quit = set([ord('q'), ord('x'), 27])
+        in_all = in_down.union(in_up).union(in_quit).union(in_left).union(in_right)
+        maxy, maxx = stdscr.getmaxyx()
+        y, x = 0, 0
+        t = time.time()
+        run = True
+        stdscr.nodelay(True)
+        stdscr.keypad(True)
+        changed = True
+        input = None
+        lines = ['Initializing ...']
+        while(run):
+            input = stdscr.getch()
+            if input in in_all:
+                changed = True
+                if input in in_down:
+                    y = min(y+1, max(len(lines)-maxy+1, 0))
+                elif input in in_up:
+                    y = max(y-1, 0)
+                elif input in in_left:
+                    x = max(x-1, 0)
+                elif input in in_right:
+                    x = min(x+1, max(len(lines[0])-maxx+1, 0))
+                elif input in in_quit:
+                    return
+            if time.time() - t > 1:
+                lines = lineList(conn, options, columns, filter)
+                changed = True
+                t = time.time()
+            if changed and len(lines) > 0:
+                stdscr.clear()
+                pos = 1
+                stdscr.addstr(0, 0, lines[0][x:x+maxx])
+                for line in lines[y+1:y+maxy-1]:
+                    line = line[x:x+maxx]
+                    # curses uses coordinates y,x
+                    stdscr.addstr(pos, 0, line)
+                    pos += 1
+                
+                rangey, rangex = len(lines)-maxy+1, len(lines[0])-maxx+1
+                message = []
+                rely, relx = float(y) / rangey, float(x) / rangex
+                if rangey >= 0:
+                    message.append('Vertical:')
+                    if rely == 0:
+                        message.append('Top')
+                    elif rely >= 1:
+                        message.append('Bottom')
+                    else:
+                        message.append('%.0f %%' % (rely * 100))
+                if rangex >= 0:
+                    message.append('  Horizontal:')
+                    if  relx == 0:
+                        message.append('Left')
+                    elif relx >= 1:
+                        message.append('Right')
+                    else:
+                        message.append('%.0f %%' % (relx * 100))
+                stdscr.addstr(maxy-1, 0, ' '.join(message))
+                stdscr.refresh()
+                changed = False
+            time.sleep(0.1)
+
+    curses.wrapper(hook)
+
+def torrentmonitor(conn, options, columns):
+    if len(columns) == 0:
+        columns = default_torrent_columns
+    monitor(conn, options, columns, 'torrent IS NOT NULL')
+
+def clean(conn, options, args):
+    sql = 'DELETE FROM download_queue WHERE status = 5 '+userClause(options)
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    cursor.close()
+    conn.commit()
+
+def pause(conn, options, ids):
+    sql = 'UPDATE download_queue SET status = 3 WHERE (status = 1 OR status = 2) '+userClause(options)+" "+idClause(ids)
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    cursor.close()
+    conn.commit()
+
+def resume(conn, options, ids):
+    sql = 'UPDATE download_queue SET status = 1 WHERE (status = 3) '+userClause(options)+" "+idClause(ids)
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    cursor.close()
+    conn.commit()
+
+def restart(conn, options, ids):
+    sql = 'UPDATE download_queue SET status = 1 WHERE (status = 101 OR status = 107) '+userClause(options)+" "+idClause(ids)
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    cursor.close()
+    conn.commit()
+
+def remove(conn, options, ids):
+    sql = 'DELETE FROM download_queue WHERE 1=1 '+userClause(options)+" "+idClause(ids)
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    cursor.close()
+    conn.commit()
+
+def add(conn, options, urls):
+    if options.user == None:
+        user = 'admin'
+    else:
+        user = options.user
+    if len(urls) == 0:
+        urls = []
+        input = '\n'.join(sys.stdin.readlines())
+        urls = parseURLs(options.expression, input)
+    # earlier versions of DiskStation don't have a target column
+    # use only if necessary
+    useTarget = options.target != ''
+    if useTarget:
+        sql = "INSERT INTO download_queue (username, url, status, filename, pid, created_time, destination) VALUES (%s, %s, 1, %s, -1, %s, %s)"
+    else:
+        sql = "INSERT INTO download_queue (username, url, status, filename, pid, created_time) VALUES (%s, %s, 1, %s, -1, %s)"
+    params = []
+    now = int(time.time())
+    cursor = conn.cursor()
+    ids = []
+    for url in urls:
+        if useTarget:
+            tupel = (user, url, parseFilename(url), now, options.target)
+        else:
+            tupel = (user, url, parseFilename(url), now)
+        params.append(tupel)
+        cursor.execute(sql, tupel)
+        cursor.execute("SELECT lastval()")
+        ids.append(cursor.fetchone()[0])
+    cursor.close()
+    print 'Adding URLs:'
+    for e in params:
+        print e[1]
+    conn.commit()
+    return ids
+
+def torrent(conn, options, files):
+    if options.user == None:
+        user = 'admin'
+    else:
+        user = options.user
+    params = []
+    useTarget = options.target != ''
+    for file in files:
+        # try: catch: finally: is buggy in python 2.4
+        # using separate try blocks as workaround
+        try:
+            try:
+                stream = open(file, 'rb')
+                content = db.PgBytea(stream.read())
+                now = int(time.time())
+                name = parseFilename(file)
+                if useTarget:
+                    tupel = (user, name, name, now, content, options.target)
+                else:
+                    tupel = (user, name, name, now, content)
+                params.append(tupel)
+            except IOError:
+                sys.stderr.write('could not read file %s\n' % file)
+        finally:
+            stream.close()
+    if useTarget:
+        sql = "INSERT INTO download_queue (username, url, status, filename, pid, created_time, torrent, task_flags, seeding_interval, destination) VALUES (%s, %s, 1, %s, -1, %s, %s, 4, -1, %s)"
+    else:
+        sql = "INSERT INTO download_queue (username, url, status, filename, pid, created_time, torrent, task_flags, seeding_interval) VALUES (%s, %s, 1, %s, -1, %s, %s, 4, -1)"
+    cursor = conn.cursor()
+    cursor.executemany(sql, params)
+    cursor.close()
+    print 'Adding Torrent Files:'
+    for e in params:
+        print e[2]
+    conn.commit()
+
+def interactive_mode(options):
+    connection = getConnection(options)
+    print '\n', '*'*32
+    print 'Downloadstation Interactive Mode'
+    print '*'*32, '\n'
+    print "type 'exit' or EOF (CTRL-D) to quit"
+    print "type 'set <var> <value>' to set an option"
+    print "type 'reconnect' to create a new connection after changing the connection related options"
+    print
+    while 1:
+        sys.stdout.write('>>> ')
+        line = sys.stdin.readline()
+        part = partition(line, ' ')
+        command = part[0].strip()
+        args = []
+        for arg in part[2].split():
+            args.append(arg.strip())
+        if command in commands:
+            commands[command](connection, options, args)
+        elif command == 'set':
+            options.__dict__[args[0]] = args[1]
+        elif command == 'reconnect':
+            connection.close()
+            connection = getConnection(options)
+        elif command == 'exit' or command == 'quit' or command == '':
+            break
+        else:
+            print 'Command %s not found.' % command
+            
+
+# package management ******************************************************
+
+class StaticMethod:
+    def __init__(self, function):
+        self.__call__ = function
+
+class Group:
+
+    EXTRACTED = 'x'
+    REMOVED   = 'r'
+
+    def __init__(self, jobs, flags=[]):
+        self.jobs = jobs
+        self.flags = flags
+
+    def write(self, file):
+        file.write('Group: ')
+        file.write(', '.join(self.flags))
+        file.write('\n')
+        for url in self.jobs:
+            file.write(str(url))
+            file.write('\n')
+
+    def files(self, conn):
+        cursor = conn.cursor()
+        sql = "SELECT filename FROM download_queue WHERE task_id = %s ORDER BY task_id" % ' OR task_id='.join(self.jobs)
+        cursor.execute(sql)
+        result = cursor.fetchall()
+        cursor.close()
+        return map(lambda t: t[0], result)
+
+    def remaining(self, conn):
+        #f = (lambda x: os.path.exists(Package.DOWNLOAD_DIR+x))
+        def f(x):
+            return not os.path.exists(Package.DOWNLOAD_DIR+x)
+        return filter(f, self.files(conn))
+
+    def complete(self, conn):
+        return len(self.remaining(conn)) == 0
+
+    def processed(self):
+        return Group.EXTRACTED in self.flags
+
+    def removed(self):
+        return Group.REMOVED in self.flags
+
+
+class Package:
+
+    STORE_DIR = os.path.expanduser('~/.downloadstationcli/packages/')
+    DOWNLOAD_DIR = os.path.expanduser('/volume1/downloads/')
+    multiPartRegex = re.compile(r'(.+)(:?\.part\d+\.rar|.r\d+)$')
+
+    def __init__(self, name, groups, password=None):
+        self.name = name
+        self.groups = groups
+        self.password = password
+    
+    def jobs(self):
+        list = []
+        for g in self.groups:
+            list.extend(g.jobs)
+        return list
+
+    def files(self, conn):
+        result = []
+        for g in self.groups:
+            result.extend(g.files(conn))
+        return result
+
+    def removed(self):
+        for g in self.groups:
+            if not g.removed():
+                return False
+        return True
+
+    def open(name):
+        file = open(Package.STORE_DIR+name, 'r')
+        try:
+            groups = []
+            groupURLs  = None
+            group = None
+            flags= None
+            password = None
+            for line in file.readlines():
+                if line.startswith('Group:'):
+                    if groupURLs != None:
+                        groups.append(Group(groupURLs, flags))
+                    flags = map(str.strip, line[6:].split(','))
+                    groupURLs = []
+                elif line.startswith('Password:'):
+                    password = line[9:].strip()
+                else:
+                    groupURLs.append(line.strip())
+            if groupURLs != None:
+                groups.append(Group(groupURLs, flags))
+            return Package(name, groups, password)
+        finally:
+            file.close()
+
+    def save(self):
+        if not os.path.isdir(Package.STORE_DIR):
+            os.makedirs(Package.STORE_DIR)
+        file = open(Package.STORE_DIR+self.name, 'w')
+        try:
+            for group in self.groups:
+                group.write(file)
+            if self.password != None:
+                file.write('Password: ')
+                file.write(self.password)
+                file.write('\n')
+            print 'Package "%s" saved to "%s%s"' % \
+                (self.name, Package.STORE_DIR, self.name)
+        finally:
+            file.close()
+
+    def remove(self):
+        os.remove(Package.STORE_DIR+self.name)
+        print 'Package "%s" removed.' % self.name
+
+    def getPrefix(file):
+        m = Package.multiPartRegex.match(file)
+        if m:
+            return m.group(1)
+        else:
+            return None
+
+    open = StaticMethod(open)
+    getPrefix = StaticMethod(getPrefix)
+
+def for_each_package(conn, options, command):
+    for name in os.listdir(Package.STORE_DIR):
+        command(conn, options, name)
+
+def pkg_list(conn, options, name=None):
+    if name == None:
+        for file in os.listdir(Package.STORE_DIR):
+            print file
+    else:
+        pkg = Package.open(name)
+        i = 1
+        for g in pkg.groups:
+            print 'Group %d:' % i
+            i += 1
+            filter = 'task_id = ' + 'OR task_id = '.join(g.jobs)
+            list(conn, options, default_columns, filter)
+            print
+
+def pkg_create(conn, options, name):
+    def parse(string):
+        urls = parseURLs(options.expression, string)
+        groups = []
+        group = None
+        groupPrefix = None
+        for url in urls:
+            file = parseFilename(url)
+            prefix = Package.getPrefix(file)
+            if groupPrefix == None or groupPrefix != prefix:
+                groupPrefix = prefix
+                group = []
+                groups.append(group)
+            group.append(url)
+        password = string.strip().splitlines()[-1].strip()
+        return groups, password
+    
+    # override -t option, not supported for packages
+    if options.target != '':
+        print 'option --target not supported for packages'
+        sys.exit(2)
+    if name == 'all':
+        raise '"all" is not allowed as a package name'
+    groupedURLs, password = parse('\n'.join(sys.stdin.readlines()))
+    groups = []
+    for urls in groupedURLs:
+        ids = add(conn, options, urls)
+        groups.append(Group(ids))
+    pkg = Package(name, groups, password)
+    pkg.save()
+
+extractors = {"rar":"unrar x '-p%s' '%s'", "zip":"unzip -P '%s' '%s'"}
+
+def do_process(conn, options, pkg, grp):
+    path = Package.DOWNLOAD_DIR+pkg.name+'/'
+    if not os.path.exists(path):
+        os.makedirs(path)
+    oldpath = os.getcwdu()
+    try:
+        os.chdir(path)
+        files = grp.files(conn)
+        ext = files[0][-3:]
+        if ext in extractors:
+            import subprocess
+            cmd = extractors[ext] % (pkg.password, '../'+files[0])
+            p = subprocess.Popen(cmd, shell=True)
+            p.communicate()
+            if p.returncode != 0:
+                raise "Error during extracting"
+        else:
+            for f in files:
+                os.rename('../'+f, f)
+        grp.flags.append(Group.EXTRACTED)
+    finally:
+        os.chdir(oldpath)
+
+
+
+def pkg_process(conn, options, name):
+    pkg = Package.open(name)
+    i = 0
+    try:
+        for g in pkg.groups:
+            try:
+                i += 1
+                if g.processed():
+                    print "Group %d already processed." % i
+                elif g.removed():
+                    print "Group %d was removed." % i
+                elif not g.complete(conn):
+                    print "Group %d is missing files:" % i
+                    for f in g.remaining(conn):
+                        print Package.DOWNLOAD_DIR+f
+                else:
+                    print "Extracting Group %d." % i
+                    do_process(conn, options, pkg, g)
+            except:
+                print "Group %d could not be processed." % i
+    finally:
+        pkg.save()
+
+def pkg_clean(conn, options, name):
+    pkg = Package.open(name)
+    i = 0
+    for g in pkg.groups:
+        i += 1
+        if not g.processed():
+            print "Group %d not processed yet." % i
+        elif g.removed():
+            print "Group %d was already removed." % i
+        else:
+            print "Cleaning up Group %d." % i
+            for f in g.files(conn):
+                path = Package.DOWNLOAD_DIR+f
+                if os.path.isfile(path):
+                    os.remove(path)
+            remove(conn, options, g.jobs)
+            g.flags.append(Group.REMOVED)
+    if pkg.removed():
+        pkg.remove()
+    else:
+        pkg.save()
+
+def pkg_pac(conn, options, name):
+    pkg_process(conn, options, name)
+    pkg_clean(conn, options, name)
+
+def pkg_remove(conn, options, name):
+    pkg = Package.open(name)
+    print "Removing package %s." % name
+    for f in pkg.files(conn):
+        path = Package.DOWNLOAD_DIR+f
+        if os.path.isfile(path):
+            os.remove(path)
+    jobs = pkg.jobs()
+    if len(jobs) > 0:
+        remove(conn, options, jobs)
+    pkg.remove()
+
+def pkg_pause(conn, options, name):
+    pause(conn, options, Package.open(name).jobs())
+
+def pkg_resume(conn, options, name):
+    resume(conn, options, Package.open(name).jobs())
+
+def pkg_password(conn, options, name, password):
+    p = Package.open(name)
+    p.password = password
+    p.save()
+
+pkg_commands = {
+    'list':    pkg_list,
+    'create':  pkg_create,
+    'process': pkg_process,
+    'clean':   pkg_clean,
+    'pac':     pkg_pac,
+    'password':pkg_password,
+    'remove':  pkg_remove,
+    'pause':   pkg_pause,
+    'resume':  pkg_resume
+}
+
+
+def pkg(conn, options, args):
+    command = pkg_commands[args[0]]
+    if len(args) > 1 and args[1] == 'all':
+        for_each_package(conn, options, command)
+    else:
+        command(conn, options, *args[1:])
+
+# command mapping *********************************************************
+
+commands = {
+    'list':     list,
+    'clean':    clean,
+    'pause':    pause,
+    'resume':   resume,
+    'restart':  restart,
+    'remove':   remove,
+    'add':      add,
+    'monitor':  monitor,
+    'torrent':  torrent,
+    'tlist':    torrentlist,
+    'tmonitor': torrentmonitor,
+    'pkg': pkg
+}
+
+# connection and command selection ****************************************
+
+def getConnection(options):
+    return db.connect(user = 'admin', password = 'dd@awylds', host = options.host, port = options.port, database = 'download')
+
+def createOptionParser():
+    p = optparse.OptionParser(
+        description='CLI for Synology Downloadstation',
+        prog='downloadstation',
+        version='downloadstationcli 1.7',
+        usage='%prog <command> <options> <arguments>\nCommands:\n'+
+            'list'+' '*18+'print a list of all jobs\n'+
+            'tlist'+' '*17+'same as list, for torrents only\n'+
+            'monitor'+' '*15+'view the list of all jobs in real time\n'+
+            'tmonitor'+' '*14+'same as monitor, for torrents only\n'+
+            'clean'+' '*17+ 'remove completed jobs\n'+
+            'add'+' '*19+'add urls\n'+
+            'torrent'+' '*15+'add torrents\n'+
+            'remove' +' '*16+'remove specified download jobs\n'+
+            'pause' +' '*17+'pause specified download jobs\n'+
+            'restart' +' '*15+'restart specified download jobs\n'+
+            'resume' +' '*16+'continue specified download jobs')
+
+    for o in option_conf:
+        p.add_option(o[0], o[1], default=o[2])
+    return p
+
+def main():
+    p = createOptionParser()
+    # check for command; if none given, start interactive mode
+    if len(sys.argv) < 2 or sys.argv[1].startswith('-'):
+        options, args = p.parse_args()
+        interactive_mode(options)
+    else:
+        command = sys.argv[1]
+        options, args = p.parse_args(sys.argv[2:])
+        connection = getConnection(options)
+        commands[command](connection, options, args)
+        connection.close()
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print 'User Abort'

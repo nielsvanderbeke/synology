@@ -1,0 +1,528 @@
+<!--?xml version="1.0" ?-->
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+		<title>A CLI for Synology Download Station</title>
+		<style type="text/css">
+			div.code {
+				border:dashed 1px #000099;
+				margin:10px;
+				padding:5px;
+				background:#ddd;
+				font-family:monospace;
+			}
+			ul.news {
+				border:solid 1px #000099;
+				margin:10px;
+                margin-top:0px;
+				padding:5px;
+				background:#ddd;
+			}
+            ul.news li {
+                margin-left:20px;
+            }
+            dt {
+                font-weight:bold;
+            }
+		</style>
+	</head>
+	<body>
+		<h1>Downloadstation CLI</h1>
+
+        <ul class="news">
+            <li>2009-08-08: Version 1.0 released. The new release features
+            better listing and filtering of duplicate URLs.</li>
+            <li>2009-08-09: Version 1.1 released. A new command
+            <a href="#monitor">monitor</a>
+            for monitoring download progress over a period of time has been
+            added.
+            </li>
+            <li>2009-09-04: Version 1.2 released.
+            Torrents are now supported. New torrent-related commands
+            <a href="#torrent">torrent</a>,
+            <a href="#tlist">tlist</a>,
+            <a href="#tmonitor">tmonitor</a>
+            are now available.</li>
+            <li>2009-09-06: Version 1.3 released. Fixed broken
+            <a href="#clean">clean</a> command.</li>
+            <li>2010-02-14: Version 1.4 released. The script now uses Python
+            2.4 by default due to a compatibility issue in the python25 and
+            py25-pgsql packages. It is necessary to install
+            <a href="#installation"> the appropriate packages</a> for the
+            new version to work.
+            </li><li>2010-08-20: Version 1.5 released. Added
+            <a href="#package">package functionality</a>.
+            Packages help organize downloaded files into subfolders and
+            simplify extraction of downloaded zip/rar archives.
+            </li><li>2010-10-14: Version 1.6 released. URLs containing the
+            equals (=) symbol are now parsed correctly when using
+            <a href="#list">list</a> and <a href="#pkg_create">
+            pkg create</a>.</li>
+            <li>2011-10-02: Version 1.7 released. Fixed --user option not working.
+            Added --target option for specifying subdirectories for downloaded
+            files.</li>
+            <li>2013-05-01: Version 1.8 released. New commands <a href="#restart">restart</a> and <a href="#pkg_password">pkg
+                password</a> added.</li>
+        </ul>
+
+		<a href="http://downloadstation.jroene.de/downloadstation">Get Downloadstation CLI</a>
+        <h2>Contents</h2>
+        <ol>
+            <li><a href="#overview">Overview</a></li>
+            <li><a href="#installation">Installation</a></li>
+            <li><a href="#usage">Usage</a>
+                <ul>
+                    <li><a href="#list">list</a></li>
+                    <li><a href="#tlist">tlist</a></li>
+                    <li><a href="#monitor">monitor</a></li>
+                    <li><a href="#tmonitor">tmonitor</a></li>
+                    <li><a href="#add">add</a></li>
+                    <li><a href="#torrent">torrent</a></li>
+                    <li><a href="#clean">clean</a></li>
+                    <li><a href="#pause">pause</a></li>
+                    <li><a href="#resume">resume</a></li>
+                    <li><a href="#restart">restart</a></li>
+                    <li><a href="#remove">remove</a></li>
+                    <li><a href="#misc">Options</a></li>
+                </ul>
+            </li>
+            <li><a href="#package">Download Packages</a>
+                <ul>
+                    <li><a href="#pkg_list">pkg list</a></li>
+                    <li><a href="#pkg_create">pkg create</a></li>
+                    <li><a href="#pkg_password">pkg create</a></li>
+                    <li><a href="#pkg_pause">pkg pause</a></li>
+                    <li><a href="#pkg_resume">pkg resume</a></li>
+                    <li><a href="#pkg_process">pkg process</a></li>
+                    <li><a href="#pkg_clean">pkg clean</a></li>
+                    <li><a href="#pkg_remove">pkg remove</a></li>
+                    <li><a href="#pkg_pac">pkg pac</a></li>
+                </ul>
+            </li>
+            <li><a href="#contact">Bugs, Feature Requests, etc.</a></li>
+        </ol>
+		<a name="overview">
+		<h2>1. Overview</h2>
+		<p>This tool provides access to the Synology Download Station on your 
+Synology NAS device from the command line. You can add, remove, pause, 
+resume, and list the download jobs.</p>
+		<p>The main motivation for developing this tool was the lack of a 
+function to add multiple URLs in the web interface and the client from 
+Synology, and the wish to control Download Station via SSH from remote 
+locations without port forwarding. Moreover, there are people who like 
+text-based interfaces better, so this is nice for those people, too.</p>
+		</a><p><a name="overview">Please note: If you do not care about controlling Download Station via SSH or prefer a GUI over the CLI, give </a><a href="http://www.synology.com/enu/forum/viewtopic.php?f=38&amp;t=4894">SynoDownloader</a> a try. Downloadstation CLI is mainly aimed at people with some experience with the CLI.</p>
+		<p>If you are interested now, you can <a href="http://downloadstation.jroene.de/downloadstation">download the program here</a>.</p>
+
+		<p>Please keep in mind that this program does not support all features
+ of Synology Download Station, but only downloads via HTTP, FTP and 
+BitTorrent. Furthermore, I could only test it on my own Synology device 
+(DS207+). So if you encounter any difficulties or unexspected behaviour,
+ feel free to report it using the email address <a href="#contact">below</a>.</p>
+		
+		<p>It is possible to run the tool on a host other than the disk 
+station. However, this requires modifying the configuration of the 
+database running on the disk station. If there are people who are 
+interested in doing this, I will write a tutorial on that topic in the 
+future.</p>
+		<a name="installation">
+<h2>2. Installation</h2>
+<h3>Basic Script</h3>
+</a><p><a name="installation">To use Downloadstation CLI, you will have to activate SSH or telnet on your diskstation and install ipkg:<br>
+</a><a href="http://www.synology.com/wiki/index.php/Enabling_the_Command_Line_Interface">Enable SSH or telnet</a><br>
+<a href="http://www.synology.com/wiki/index.php/Overview_on_modifying_the_Synology_Server%2C_bootstrap%2C_ipkg_etc#How_to_install_ipkg">Install ipkg</a>
+</p>
+<p>
+You need Python 2.4 and PgSQL installed  to run the program. To do this, ssh (or telnet) into your diskstation as root and type:</p>
+<div class="code">ipkg install python24 py-pgsql py24-mx-base</div>
+<p>After that, copy the file to your NAS. The location should be in the 
+PATH (e.g. /opt/bin). Check that the file can be executed and then type</p>
+<div class="code">downloadstation</div>
+<p>
+and hopefully, you will be greeted by interactive mode.
+</p>
+<p>That is all you need to use most of the features of the script. The 
+additional installation steps described below are optional and can be 
+performed at a later time.</p>
+
+<h3>Getting Accurate Values for Running Downloads</h3>
+<p>In newer firmware versions the download progress is only written to 
+the database if a flag in a partition of Unix shared memory is set. 
+Since the script does not use the web interface, this does not happen 
+automatically.</p>
+<p>The solution is a small C snippet based on the (GPL'd) source code of
+ the Disk Station firmware. This program will set the required flag.</p><p>
+</p><p>You need gcc installed to compile the program for your DS:</p>
+<div class="code">ipkg install gcc</div>
+<p>If gcc is installed properly and on the PATH, execute the following steps to compile the program and install:</p>
+<div class="code">
+    cd /tmp<br>
+    wget http://downloadstation.jroene.de/trigger_syno_dl_update.c<br>
+    wget http://downloadstation.jroene.de/dls.sh<br>
+    gcc -o downloadstation_shm trigger_syno_dl_update.c<br>
+    mv downloadstation_shm /opt/bin<br>
+    mv dls.sh /opt/bin/dls<br>
+    chmod 0755 /opt/bin/dls<br>
+    chmod 0755 /opt/bin/downloadstation_shm
+</div>
+<p>Alternatively, you can download <a href="http://downloadstation.jroene.de/install.sh">an installation script</a> that will execute those commands for you.</p>
+<p>After installation a new command <em>dls</em> is available. This is a script that first calls <em>downloadstation_shm</em> to update the shared memory and then the <em>downloadstation</em> script. Use <em>dls</em> instead of <em>downloadstation</em> and your database will always hold up-to-date values for running downloads.</p>
+<p>You can also use the <em>downloadstation_shm</em> program to manually read/write to the shared memory section:</p>
+<div class="code">
+    downloadstation_shm get<br>
+    downloadstation_shm set
+</div>
+
+<h3>Extraction of Downloaded Files</h3>
+<p>If you want to use the script to extract zip and rar files it is necessary to install unzip and unrar and have them on the PATH.</p>
+<div class="code">ipkg install unzip unrar</div>
+<p>For more information read the <a href="#package">Download Packages</a> section.</p>
+
+<a name="usage">
+<h2>3. Usage</h2>
+<p>
+There are two methods to use the program. You can either type 
+"downloadstation &lt;command&gt; &lt;options&gt; &lt;arguments&gt;" to 
+do a single operation or type "downloadstation &lt;options&gt; to enter 
+interactive mode.
+In this documentation we will focus on the former as the commands in 
+interactive mode work similar.
+In the following text, each command will be described by first providing
+ one or more examples and then explaining what it does.</p>
+
+</a><ul><a name="usage">
+    </a><li><a name="usage"></a><a href="#list">list</a></li>
+    <li><a href="#tlist">tlist</a></li>
+    <li><a href="#monitor">monitor</a></li>
+    <li><a href="#tmonitor">tmonitor</a></li>
+    <li><a href="#add">add</a></li>
+    <li><a href="#torrent">torrent</a></li>
+    <li><a href="#clean">clean</a></li>
+    <li><a href="#pause">pause</a></li>
+    <li><a href="#resume">resume</a></li>
+    <li><a href="#remove">remove</a></li>
+    <li><a href="#pkg_list">pkg list</a></li>
+    <li><a href="#pkg_create">pkg create</a></li>
+    <li><a href="#pkg_pause">pkg pause</a></li>
+    <li><a href="#pkg_resume">pkg resume</a></li>
+    <li><a href="#pkg_process">pkg process</a></li>
+    <li><a href="#pkg_clean">pkg clean</a></li>
+    <li><a href="#pkg_remove">pkg remove</a></li>
+    <li><a href="#pkg_pac">pkg pac</a></li>
+</ul>
+
+<a name="list">
+<h3>list - list download jobs</h3>
+<div class="code">downloadstation list<br>
+downloadstation list task filename created_time status</div>
+<p>
+Prints a list of the current download jobs. The arguments contain the 
+properties which you want to be displayed. When ommitted, the defaults 
+are task, filename, status.
+</p>
+<p>
+Valid arguments are:
+    </p><dl>
+        <dt>created</dt>
+        <dd>time the job was created</dd>
+
+        <dt>filename</dt>
+        <dd>name of the file</dd>
+
+        <dt>part_size</dt>
+        <dd>size of the already downloaded part</dd>
+
+        <dt>pid</dt>
+        <dd>id of the (system) process which downloads the file</dd>
+
+        <dt>progress</dt>
+        <dd>percentage of the already downloaded part</dd>
+
+        <dt>rate</dt>
+        <dd>current download speed</dd>
+
+        <dt>simple_status  </dt>
+        <dd>shows the current status of the download job</dd>
+
+        <dt>size</dt>
+        <dd>the total size of the file</dd>
+
+        <dt>started</dt>
+        <dd>when the download was started</dd>
+
+        <dt>status</dt>
+        <dd>like simple_status, but displays the progress for active downloads</dd>
+        <dt>task</dt>
+        <dd>the id of the download job</dd>
+        <dt>url</dt>
+        <dd>URL of the file</dd>
+        <dt>user</dt>
+        <dd>the user who created the download job</dd>
+    </dl>
+
+    BitTorrent related properties:
+    <dl>
+        <dt>available_pieces</dt>
+        <dd>number of pieces available from peers</dd>
+        <dt>connected_peers</dt>
+        <dd>number of connected peers</dd>
+        <dt>downloaded_pieces</dt>
+        <dd>number of already downloaded pieces </dd>
+        <dt>leachers</dt>
+        <dd>number of known leechers</dd>
+        <dt>seeders</dt>
+        <dd>number of known seeders</dd>
+        <dt>seeding_ratio</dt>
+        <dd>seeding ratio</dd>
+        <dt>total_peers</dt>
+        <dd>number of known peers</dd>
+        <dt>total_pieces</dt>
+        <dd>total number of pieces of the torrent</dd>
+        <dt>upload_rate</dt>
+        <dd>current upload speed</dd>
+        <dt>upload_size</dt>
+        <dd>total size of uploaded data</dd>
+    </dl>
+<p></p>
+</a><a name="tlist">
+<h3>tlist - list torrents only</h3>
+<div class="code">downloadstation tlist<br>
+downloadstation tlist task filename created_time status</div>
+</a><p><a name="tlist">Same as </a><a href="#list">list</a>, but shows torrents only.
+Default displayed columns are task, filename, status, rate, upload_rate, connected_peers.</p>
+<a name="monitor">
+<h3>monitor - monitor download jobs over a period of time</h3>
+<div class="code">downloadstation monitor<br>
+downloadstation monitor task filename created_time status</div>
+</a><p><a name="monitor">Accepts the same arguments as </a><a href="#list">list</a> does. Displays the table with download jobs and refreshes it every second.</p>
+<p>Navigation is done with either the cursor keys or the VI movement keys (h, j, k, l). To exit, press q, Escape or Ctrl-C.</p>
+
+<a name="tmonitor">
+<div class="code">downloadstation tmonitor<br>
+downloadstation tmonitor task filename created_time status</div>
+<h3>tmonitor - monitor torrents only</h3>
+</a><p><a name="tmonitor">Same as </a><a href="#monitor">monitor</a>, but for torrents only.</p>
+
+<a name="add">
+<h3>add - add one or more download jobs</h3>
+<div class="code">downloadstation add http://www.example.net/file.zip http://www.example.com/funnystuff.avi</div>
+<p>
+Adds download jobs for the resources given as arguments.</p>
+<p>It is also possible to parse URLs from text read from stdin. To do this call add without arguments:</p>
+<div class="code">downloadstation add &lt; someurls.txt</div>
+<p>This will add all URLs occuring in someurls.txt.<br>
+But wait, there is more. Consider you want to download some files listed
+ on a web page, but the webpage also contains links to files you do not 
+want. Using</p>
+<div class="code">downloadstation add &lt; somesite.html</div>
+<p>would add every linked resource. To solve this, there is the option 
+-e or --expression which lets you specify the URLs you want by a 
+wildcard pattern:</p>
+<div class="code">downloadstation add -e *.jpg &lt; somesite.html<br>
+downloadstation add -e *rapidshare.com* &lt; somesite.html</div>
+<p>The first example would add all URLs ending with .jpg, so you get all
+ JPEG images embedded in somesite.html while the second would add all 
+rapidshare links.
+</p>
+<p>As of version 1.0 duplicates are filtered automatically when parsing URLs.</p>
+</a><p><a name="add">You can also use the -t (or --target) option to 
+specify a subdirectory for the downloaded files. Note that this will 
+result in an error if your version of the DS firmware does not support 
+subdirectories for downloads. Using subdirectories in combination with </a><a href="#package">Download Packages</a> is not supported at the moment.</p>
+
+<a name="torrent">
+<h3>torrent - add BitTorrent download jobs</h3>
+<div class="code">downloadstation torrent file1.torrent file2.torrent</div>
+<p>Creates download jobs from the supplied torrent files.</p>
+
+</a><a name="clean">
+<h3>clean - remove finished jobs</h3>
+<div class="code">downloadstation clean</div>
+<p>
+Removes any download jobs which are completed. Does <b>not</b> remove 
+download jobs which resulted in error so you can use this command 
+without having to worry about deleting something containing useful 
+information.
+</p>
+</a><a name="pause">
+<h3>pause - pause download jobs</h3>
+<div class="code">downloadstation pause 1032 1033<br>
+downloadstation pause all</div>
+<p>
+Pauses specified downloads. You can specify the ids of the jobs you want
+ to pause in the arguments. The keyword "all" pauses all incomplete 
+download jobs. Useful if you have a rather large batch of jobs but need 
+the bandwidth for the moment.
+</p>
+</a><a name="resume">
+<h3>resume - resume paused jobs</h3>
+<div class="code">downloadstation resume 1032 1033<br>
+downloadstation resume all</div>
+</a><p><a name="resume">
+Works the same as </a><a href="#pause">pause</a>, but resumes paused jobs.
+</p>
+<a name="restart">
+<h3>restart - restart failed jobs</h3>
+<div class="code">downloadstation restart 1032 1033<br>
+downloadstation restart all</div>
+</a><p><a name="restart">
+Works the same as </a><a href="#pause">pause</a>, but restarts jobs that failed,
+i.e. that have a status of 101 (ERROR) or 107 (TIMEOUT).
+</p>
+<a name="remove">
+<h3>remove - remove a job</h3>
+<div class="code">downloadstation remove 1032 1033<br>
+downloadstation remove all</div>
+</a><p><a name="remove">
+Removes a download job. Same syntax as </a><a href="#pause">pause</a>. Use with care!
+</p>
+<a name="misc">
+<h3>Miscelleanous options</h3>
+<table>
+  <tbody><tr><th>short</th><th>long</th><th>Meaning</th></tr>
+  <tr><td>-u</td><td>--user</td><td>Restrict all actions to jobs belonging to USER</td></tr>
+  <tr><td>-s</td><td>--host</td><td>Host of the downloadstation database</td></tr>
+  <tr><td>-p</td><td>--port</td><td>Port of the downloadstation database</td></tr>
+  <tr><td>-h</td><td>--help</td><td>Display help</td></tr>
+  <tr><td> / </td><td>--version</td><td>Show version information</td></tr>
+</tbody></table>
+
+</a><a name="package">
+<h2>4. Download Packages</h2>
+<p>As of version 1.5 it is possible to group a list of download tasks. This comes with two main features:</p>
+<ul>
+    <li>list / pause / resume the tasks of a package with a single command</li>
+    <li>when a task is finished, downloaded files may be extracted and organized into subfolders by another command</li>
+</ul>
+
+<h3>Additional Setup</h3>
+<p>There are a few steps required before you can use this feature.</p>
+<p>At the moment, the script assumes that your download directory is 
+/volume1/downloads. If this is not the case, package management will not
+ work unless you search the script for /volume1/downloads and replace it
+ with the proper location for your system.</p>
+<p>For each package a file containing metadata will be created in a 
+subfolder in your home directory (e.g. 
+~/.downloadstationcli/packages/mypackage). The file is removed when the 
+package is cleaned.</p>
+<p>Automatic extraction requires the appropriate binaries to be 
+installed and on the PATH. Currently supported are rar and zip files. 
+The required binaries are unrar and unzip. Install them with "ipkg 
+install unrar unzip".</p>
+
+<h3>Usage</h3>
+<p>Packages are identified by their names. In the examples below, the package name "mypackage" is used.</p>
+<p>When creating a package, files are subdivided into groups. Usually 
+every file gets its own group. However, files of supported multi-part 
+archives (currently *.partX.rar and *.rXX) are put into the same group. 
+The grouping is necessary to avoid extracting a multi-part archive 
+before all files are downloaded or calling unrar on each of the parts.</p>
+<p>It is not intended that the package functionality (especially the 
+process and clean operations) is used simultaneously by different 
+processes. This will have unexpected results. Don't do it!</p>
+
+<h3>General Workflow</h3>
+<p>This a short description of the typical lifecycle of a package named "mypackage".</p>
+<ol>
+    <li>Create the package. URLs are read from stdin.
+    <div class="code">downloadstation pkg create mypackage &lt; thisContainsSomeURLs.txt</div></li>
+    <li>Wait for it to download. Do a list now and then to see if it has finished.
+    <div class="code">downloadstation pkg list mypackage</div></li>
+    <li>When it is finished, call process. This will create a subdirectory "mypackage" in your download folder and put the files there.
+    <div class="code">downloadstation pkg process mypackage</div></li>
+    <li>Finally, clean the package. The download tasks will be removed 
+from the database and the package file 
+(~/.downloadstationcli/packages/mypackage) will be deleted.
+    <div class="code">downloadstation pkg clean mypackage</div></li>
+    
+</ol>
+
+</a><a name="pkg_list">
+<h3>pkg list - list packages or download tasks of a package</h3>
+<div class="code">downloadstation pkg list<br>
+    downloadstation pkg list mypackage</div>
+<p>The first example returns a list of all packages.</p>
+</a><p><a name="pkg_list">The second example does the same as </a><a href="#list">"downloadstation list"</a> but excludes all tasks that are not part the given package.</p>
+
+<a name="pkg_create">
+<h3>pkg create - create new packages</h3>
+<div class="code">downloadstation pkg create mypackage &lt; someurls.txt</div>
+</a><p><a name="pkg_create">Creates a new package with the specified name. URLs are read from stdin the same way as using </a><a href="#add">"downloadstation add"</a>.</p>
+<p>If the package contains encrypted files that are supported (currently
+ rar/zip) the content of the last non-empty line is used as password for
+ extracting. Note that heading and trailing whitespaces are stripped.</p>
+
+<a name="pkg_password">
+<h3>pkg password - set the extraction password of an existing package</h3>
+<div class="code">downloadstation pkg password mypackage a5tHc4Sb</div>
+<p>Sets the password used to extract the files of a package. This is useful if
+the password was forgotton or mistyped during creation.</p>
+
+</a><a name="pkg_pause">
+<h3>pkg pause - pause all tasks of a package</h3>
+<div class="code">downloadstation pause mypackage</div>
+<p>Pauses all download tasks that belong to given package.</p>
+
+</a><a name="pkg_resume">
+<h3>pkg resume - resume all tasks of a package</h3>
+<div class="code">downloadstation resume mypackage</div>
+<p>Resumes all download tasks that belong to given package.</p>
+
+</a><a name="pkg_process">
+<h3>pkg process - extract and organize files into subfolders</h3>
+<div class="code">downloadstation pkg process mypackage</div>
+<p>Processes all unprocessed files of the package. This means that a 
+subfolder named after the package will be created (if it does not exist)
+ and finished downloads are moved to the subfolder.</p>
+<p>If the files are zip or rar archives, they will be extracted (to the subdirectory) instead of moved.</p>
+<p>If you call process on a package that is still missing some files, 
+the already downloaded files will be processed. If you call it again 
+later, only files that were not processed before will be affected. You 
+do not have to worry about files getting processed multiple times.</p>
+
+</a><a name="pkg_clean">
+<h3>pkg clean - remove processed packages</h3>
+<div class="code">downloadstation pkg clean mypackage</div>
+<p>After a package is processed, it may be cleaned using this command. Cleaning will have the following effects:</p>
+<ul>
+    <li>The download tasks are removed from the database.</li>
+    <li>If the package contained zipped/rared files that were extracted, the archive files are deleted from the filesystem.</li>
+</ul>
+Note that unlike </a><a href="#pkg_remove">"downloadstation pkg remove mypackage"</a> this is a safe operation - only finished tasks and archive files that were already extracted (if any) are removed.
+
+<a name="pkg_remove">
+<h3>pkg remove - remove packages</h3>
+<div class="code">downloadstation pkg remove mypackage</div>
+<p>This command does the same as clean, except it will remove a package 
+even if it has not been processed yet. This means that if you use this 
+command on an unprocessed package, it will delete the download tasks and
+ <b>delete the downloaded files</b>. Use with care!</p>
+<p>You should only use this command if you extracted files manually or 
+moved/copied them somewhere else (or if you do not need them anymore).</p>
+
+</a><a name="pkg_pac">
+<h3>pkg pac - process, then clean</h3>
+<div class="code">downloadstation pkg pac mypackage</div>
+<p>A convenience command that first calls process and then clean on the specified package.</p>
+
+</a><a name="pkg_all">
+<h3>The <i>all</i> keyword</h3>
+</a><p><a name="pkg_all">If you have multiple packages you may use the <i>all</i> keyword to apply an action to each of them. For instance, </a><a href="#pkg_list">downloadstation pkg list all</a> would list the download tasks of all packages.</p>
+<p>It is especially convenient for processing and cleaning as you might 
+forget how you named a package the day before. Note that it is always 
+safe to call <a href="#pkg_process">downloadstation pkg process all</a> or <a href="#pkg_clean">downloadstation pkg clean all</a>
+ regardless of the state of the download. Files that are not downloaded 
+will not be processed and files that are not processed will not be 
+cleaned.</p>
+<p>It would even be possible to truly automize processing of downloaded files by creating a cronjob that calls <a href="#pkg_pac">downloadstation pkg pac all</a> every hour or so. (This would interfere with hibernation of the hard disks though, so it is not recommended.)</p>
+<p>Due to <i>all</i> being a keyword trying to create a package named "all" will result in an error message.</p>
+
+<a name="contact">
+<h2>5. Reporting Bugs, Requesting features, etc.</h2>
+</a><p><a name="contact">For feedback of any kind you can </a><a href="mailto:downloadstation@jroene.de">contact the author via email</a>.<br>
+For feature requests, use the <a href="http://www.synology.com/enu/forum/viewtopic.php?f=38&amp;t=12152">thread in the official Synology forums</a> so the ideas can be discussed with other users.
+</p>
+
+
+
+</body></html>
